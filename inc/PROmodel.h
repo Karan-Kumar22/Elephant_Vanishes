@@ -1120,7 +1120,7 @@ public:
 
     float prob = term1 + term2 + term3;
 
-    const float eps = 1e-2f;
+    const float eps = 1e-4f;
 
     if (prob < 0.0f && prob > -eps) prob = 0.0f;
 
