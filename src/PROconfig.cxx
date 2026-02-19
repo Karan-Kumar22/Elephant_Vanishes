@@ -1745,19 +1745,29 @@ void PROconfig::construct_variable_collapsing_matrices(){
 }
 
 int PROconfig::HexToROOTColor(const std::string& hexColor) const{
-    if (hexColor.length() != 7 || hexColor[0] != '#') {
-        throw std::invalid_argument("Invalid hex color format. It should be in the format #RRGGBB.");
+    // Accept either #RRGGBB or #RRGGBBAA (ignore alpha if present)
+    if (hexColor.empty() || hexColor[0] != '#') {
+        throw std::invalid_argument("Invalid hex color format. It should start with '#'.");
     }
-    int r, g, b;
-    std::stringstream ss;
-    ss << std::hex << hexColor.substr(1, 2); 
-    ss >> r;
-    ss.clear();
-    ss << std::hex << hexColor.substr(3, 2); 
-    ss >> g;
-    ss.clear();
-    ss << std::hex << hexColor.substr(5, 2);
-    ss >> b;
+
+    std::string norm = hexColor;
+    if (norm.length() == 9) {
+        // #RRGGBBAA -> strip alpha
+        norm = std::string("#") + norm.substr(1, 6);
+    }
+
+    if (norm.length() != 7) {
+        throw std::invalid_argument("Invalid hex color format. It should be in the format #RRGGBB or #RRGGBBAA.");
+    }
+
+    int r = 0, g = 0, b = 0;
+    try {
+        r = std::stoi(norm.substr(1,2), nullptr, 16);
+        g = std::stoi(norm.substr(3,2), nullptr, 16);
+        b = std::stoi(norm.substr(5,2), nullptr, 16);
+    } catch (const std::exception &e) {
+        throw std::invalid_argument(std::string("Invalid hex color format: ") + e.what());
+    }
     return TColor::GetColor(r, g, b);
 }
 

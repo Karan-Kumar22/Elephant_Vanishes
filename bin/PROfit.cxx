@@ -12,6 +12,7 @@
 #include "PROcess.h"
 #include "PROsurf.h"
 #include "PROfc.h"
+#include "PROcptest.h"
 #include "PROfitter.h"
 #include "PROmodel.h"
 #include "PROMCMC.h"
@@ -111,8 +112,9 @@ int main(int argc, char* argv[])
     std::vector<TH2D*> weighthists;
 
     std::map<std::string, float> bound_list;
-    PlotBounds pbounds; 
+    PlotBounds pbounds;
     size_t nuniv;
+    size_t cptest_ngrid = 20;
 
 
     //Global Arguments for all PROfit enables subcommands.
@@ -124,6 +126,7 @@ int main(int argc, char* argv[])
     app.add_flag("-b,--progress", progress_bar, "Use a progress bar when applicable.");
     app.add_option("-o,--output",output_tag,"Additional output filename quantifier")->default_str("v1");
     app.add_option("-n, --nthread",   nthread, "Number of threads to parallelize over.")->default_val(1);
+    app.add_option("--grid", cptest_ngrid, "Number of phi_true points for cp_test subcommand [0, 2pi].")->default_val(20);
     app.add_option("-m,--max", maxevents, "Max number of events to run over.");
     app.add_option("-c, --chi2", chi2, "Which chi2 function to use. Options are PROchi or PROCNP")->default_str("PROchi");
     app.add_option("-d, --data", data_xml, "Load from a seperate data xml/data file instead of signal injection. Only used with plot subcommand.")->default_str("");
@@ -199,6 +202,9 @@ int main(int argc, char* argv[])
     //PROglobal
     CLI::App *proglobal_command = app.add_subcommand("global", "Just do a single global fit.");
 
+    //PROcptest
+    CLI::App *cptest_command = app.add_subcommand("cp_test", "CP phase sensitivity: scan chi2(phi54=0) and chi2(phi54=pi) vs true phi54 from 0 to 2pi.");
+
     //PROtest, test things
     CLI::App *protest_command = app.add_subcommand("protest", "Testing ground for rapid quick tests.");
 
@@ -210,6 +216,7 @@ int main(int argc, char* argv[])
     proglobal_command->configurable(true);
     profc_command->configurable(true);
     proplot_command->configurable(true);
+    cptest_command->configurable(true);
 
     //Parse inputs. 
     CLI11_PARSE(app, argc, argv);
@@ -753,7 +760,10 @@ int main(int argc, char* argv[])
         for(size_t i = 0; i< N_params; i++){
 
             if(i<N_phys_params){
-                log<LOG_INFO>(L"%1% || %2%  : %3% (log) %4% (nonlog) ") % __func__ % metric->GetModel().pretty_param_names[i].c_str() % best_fit(i) % pow(10,best_fit(i));
+                if(metric->GetModel().is_log10[i])
+                    log<LOG_INFO>(L"%1% || %2%  : %3% (log10) %4% (physical) ") % __func__ % metric->GetModel().pretty_param_names[i].c_str() % best_fit(i) % pow(10.0f,best_fit(i));
+                else
+                    log<LOG_INFO>(L"%1% || %2%  : %3% (physical) ") % __func__ % metric->GetModel().pretty_param_names[i].c_str() % best_fit(i);
             }else{
                 log<LOG_INFO>(L"%1% || %2%  :  %3% ") % __func__ % metric->GetSysts().spline_names[i-N_phys_params].c_str() % best_fit(i) ;
             }
@@ -1690,7 +1700,10 @@ int main(int argc, char* argv[])
         for(size_t i = 0; i< N_params; i++){
 
             if(i<N_phys_params){
-                log<LOG_INFO>(L"%1% || %2%  : %3% (log) %4% (nonlog) ") % __func__ % metric->GetModel().pretty_param_names[i].c_str() % best_fit(i) % pow(10,best_fit(i));
+                if(metric->GetModel().is_log10[i])
+                    log<LOG_INFO>(L"%1% || %2%  : %3% (log10) %4% (physical) ") % __func__ % metric->GetModel().pretty_param_names[i].c_str() % best_fit(i) % pow(10.0f,best_fit(i));
+                else
+                    log<LOG_INFO>(L"%1% || %2%  : %3% (physical) ") % __func__ % metric->GetModel().pretty_param_names[i].c_str() % best_fit(i);
             }else{
                 log<LOG_INFO>(L"%1% || %2%  :  %3% ") % __func__ % config.m_mcgen_variation_plotname_map.at(metric->GetSysts().spline_names[i-N_phys_params]).c_str() % best_fit(i);
             }
@@ -1819,6 +1832,134 @@ int main(int argc, char* argv[])
 
     //***********************************************************************
     //***********************************************************************
+    //******************** cp_test cp_test cp_test  **************************
+    //***********************************************************************
+    //***********************************************************************
+
+    if(*cptest_command){
+
+        // Find index of phi54 in the model
+        const auto phi_it = std::find(model->param_names.begin(), model->param_names.end(), "phi54");
+        if(phi_it == model->param_names.end()){
+            log<LOG_ERROR>(L"%1% || cp_test requires a model with a 'phi54' parameter. Not found.") % __func__;
+            return 1;
+        }
+        const size_t phi54_idx = std::distance(model->param_names.begin(), phi_it);
+
+        // Build uniform grid of phi_true values in [0, 2pi)
+        std::vector<float> all_phi_vals(cptest_ngrid);
+        for(size_t i = 0; i < cptest_ngrid; ++i)
+            all_phi_vals[i] = i * 2.0f * (float)M_PI / (float)cptest_ngrid;
+
+        log<LOG_INFO>(L"%1% || cp_test: %2% phi_true points, %3% threads") % __func__ % cptest_ngrid % nthread;
+
+        // Divide phi_true points across threads (stride pattern)
+        size_t nthreads = std::min((size_t)nthread, cptest_ngrid);
+        std::vector<std::vector<cptest_result>> thread_results(nthreads);
+        std::vector<std::thread> cpt_threads;
+
+        for(size_t t = 0; t < nthreads; ++t){
+            std::vector<float> thread_phi_vals;
+            for(size_t i = t; i < cptest_ngrid; i += nthreads)
+                thread_phi_vals.push_back(all_phi_vals[i]);
+
+            cptest_args args{
+                phi54_idx,
+                thread_phi_vals,
+                &thread_results[t],
+                config,
+                prop,
+                variable_systs[config.i_prime],
+                chi2,
+                fakeDataParams,
+                CVParams,
+                global_lb,
+                global_ub,
+                scanFitConfig,
+                (*myseed.getThreadSeeds())[t],
+                (int)t,
+                eventbyevent,
+                shapeonly
+            };
+            cpt_threads.emplace_back([args](){ PROfit::cptest_worker(args); });
+        }
+        for(auto& t: cpt_threads) t.join();
+
+        // Collect and sort by phi_true
+        std::vector<cptest_result> all_results;
+        for(auto& v: thread_results)
+            all_results.insert(all_results.end(), v.begin(), v.end());
+        std::sort(all_results.begin(), all_results.end(),
+                  [](const cptest_result& a, const cptest_result& b){ return a.phi_true < b.phi_true; });
+
+        // ---- Text file ----
+        {
+            std::ofstream txt(final_output_tag + "_cptest.txt");
+            txt << "# phi_true chi2_phi0 chi2_phipi\n";
+            for(const auto& r: all_results)
+                txt << r.phi_true << " " << r.chi2_phi0 << " " << r.chi2_phipi << "\n";
+        }
+
+        // ---- ROOT TGraphs ----
+        const int N = (int)all_results.size();
+        TGraph g_phi0(N), g_phipi(N);
+        for(int i = 0; i < N; ++i){
+            g_phi0.SetPoint(i,   all_results[i].phi_true, all_results[i].chi2_phi0);
+            g_phipi.SetPoint(i,  all_results[i].phi_true, all_results[i].chi2_phipi);
+        }
+        g_phi0.SetName("g_phi0");
+        g_phi0.SetTitle("#chi^{2}(#phi_{54}=0) vs true #phi_{54}");
+        g_phipi.SetName("g_phipi");
+        g_phipi.SetTitle("#chi^{2}(#phi_{54}=#pi) vs true #phi_{54}");
+
+        g_phi0.SetLineColor(kBlue+1);   g_phi0.SetLineWidth(2);
+        g_phipi.SetLineColor(kRed+1);   g_phipi.SetLineWidth(2);
+        g_phi0.SetMarkerColor(kBlue+1); g_phi0.SetMarkerStyle(20); g_phi0.SetMarkerSize(0.8);
+        g_phipi.SetMarkerColor(kRed+1); g_phipi.SetMarkerStyle(21); g_phipi.SetMarkerSize(0.8);
+
+        // ---- ROOT file ----
+        {
+            TFile rfile((final_output_tag + "_cptest.root").c_str(), "RECREATE");
+            g_phi0.Write("g_phi0");
+            g_phipi.Write("g_phipi");
+            rfile.Close();
+        }
+
+        // ---- PDF ----
+        {
+            TCanvas c("cptest", "CP test", 800, 600);
+            c.SetLeftMargin(0.13);
+            c.SetBottomMargin(0.13);
+
+            TMultiGraph mg;
+            mg.Add(&g_phi0,  "LP");
+            mg.Add(&g_phipi, "LP");
+            mg.Draw("A");
+            mg.GetXaxis()->SetTitle("True #phi_{54} (rad)");
+            mg.GetYaxis()->SetTitle("#Delta#chi^{2}");
+            mg.GetXaxis()->SetTitleSize(0.05);
+            mg.GetYaxis()->SetTitleSize(0.05);
+
+            // 1sigma, 2sigma, 3sigma reference lines
+            double xmax = 2.0 * M_PI;
+            TLine l1(0, 1, xmax, 1); l1.SetLineStyle(2); l1.SetLineColor(kGray+1); l1.Draw();
+            TLine l4(0, 4, xmax, 4); l4.SetLineStyle(2); l4.SetLineColor(kGray+1); l4.Draw();
+            TLine l9(0, 9, xmax, 9); l9.SetLineStyle(2); l9.SetLineColor(kGray+1); l9.Draw();
+
+            TLegend leg(0.65, 0.72, 0.88, 0.88);
+            leg.SetBorderSize(0);
+            leg.AddEntry(&g_phi0,  "#phi_{54} = 0",    "lp");
+            leg.AddEntry(&g_phipi, "#phi_{54} = #pi",  "lp");
+            leg.Draw();
+
+            c.Print((final_output_tag + "_cptest.pdf").c_str());
+        }
+
+        log<LOG_INFO>(L"%1% || cp_test done. Outputs: _cptest.txt  _cptest.root  _cptest.pdf") % __func__;
+    }
+
+    //***********************************************************************
+    //***********************************************************************
     //******************** TEST AREA TEST AREA     **************************
     //***********************************************************************
     //***********************************************************************
@@ -1909,13 +2050,20 @@ int main(int argc, char* argv[])
         log<LOG_INFO>(L"%1% || at paramters: ") % __func__;
 
         global_fit_out << "Global best fit:\n";
+        global_fit_out << "chi2 : " << chi2 << "\n";
 
         bool use_phys = (size_t)global_fit_result.size() == N_phys_params + metric->GetSysts().GetNSplines();
         for(long i = 0; i < global_fit_result.size(); i++){
 
             if(use_phys && i < (long)N_phys_params){
-                log<LOG_INFO>(L"%1% || %2%  : %3% (log) %4% (nonlog) ") % __func__ % metric->GetModel().pretty_param_names[i].c_str() % global_fit_result(i) % pow(10,global_fit_result(i));
-                global_fit_out << metric->GetModel().param_names[i] << " : " << global_fit_result(i) << "\n";
+                if(metric->GetModel().is_log10[i]){
+                    float phys_val = pow(10.0f, global_fit_result(i));
+                    log<LOG_INFO>(L"%1% || %2%  : %3% (log10) %4% (physical) ") % __func__ % metric->GetModel().pretty_param_names[i].c_str() % global_fit_result(i) % phys_val;
+                    global_fit_out << metric->GetModel().param_names[i] << " : " << global_fit_result(i) << " (log10)  " << phys_val << " (physical)\n";
+                } else {
+                    log<LOG_INFO>(L"%1% || %2%  : %3% (physical) ") % __func__ % metric->GetModel().pretty_param_names[i].c_str() % global_fit_result(i);
+                    global_fit_out << metric->GetModel().param_names[i] << " : " << global_fit_result(i) << "\n";
+                }
             }else{
                 long idx = use_phys ? i - N_phys_params : i;
                 log<LOG_INFO>(L"%1% || %2%  :  %3% ") % __func__ % config.m_mcgen_variation_plotname_map.at(metric->GetSysts().spline_names[idx]).c_str() % global_fit_result(i);
@@ -1941,8 +2089,14 @@ int main(int argc, char* argv[])
 
         for(long i = 0; i < global_fit_result.size(); i++){
             if(i < (long)N_phys_params){
-                log<LOG_INFO>(L"%1% || %2%  : %3% (log) %4% (nonlog) ") % __func__ % metric->GetModel().pretty_param_names[i].c_str() % global_fit_result(i) % pow(10,global_fit_result(i));
-                global_fit_out << metric->GetModel().param_names[i] << " : " << global_fit_result(i) << "\n";
+                if(metric->GetModel().is_log10[i]){
+                    float phys_val = pow(10.0f, global_fit_result(i));
+                    log<LOG_INFO>(L"%1% || %2%  : %3% (log10) %4% (physical) ") % __func__ % metric->GetModel().pretty_param_names[i].c_str() % global_fit_result(i) % phys_val;
+                    global_fit_out << metric->GetModel().param_names[i] << " : " << global_fit_result(i) << " (log10)  " << phys_val << " (physical)\n";
+                } else {
+                    log<LOG_INFO>(L"%1% || %2%  : %3% (physical) ") % __func__ % metric->GetModel().pretty_param_names[i].c_str() % global_fit_result(i);
+                    global_fit_out << metric->GetModel().param_names[i] << " : " << global_fit_result(i) << "\n";
+                }
             }else{
                 log<LOG_INFO>(L"%1% || %2%  :  %3% ") % __func__ % metric->GetSysts().spline_names[i - metric->GetModel().nparams].c_str() % global_fit_result(i);
                 global_fit_out << metric->GetSysts().spline_names[i - metric->GetModel().nparams]
