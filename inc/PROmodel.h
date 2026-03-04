@@ -1063,8 +1063,8 @@ public:
         lb = Eigen::VectorXf(3);
         ub = Eigen::VectorXf(3);
         default_val = Eigen::VectorXf(3);
-        lb << -2, -std::numeric_limits<float>::infinity(), -10;
-        ub << 2, -1e-3, 10;
+        lb << -2, -std::numeric_limits<float>::infinity(), -20;
+        ub << 2, -1e-3, 20;
         default_val << -2, -8, 0;
     }
 

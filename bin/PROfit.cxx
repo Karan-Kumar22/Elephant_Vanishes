@@ -1875,7 +1875,7 @@ int main(int argc, char* argv[])
                 CVParams,
                 global_lb,
                 global_ub,
-                scanFitConfig,
+                fitConfig,
                 (*myseed.getThreadSeeds())[t],
                 (int)t,
                 eventbyevent,
